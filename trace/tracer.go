@@ -35,8 +35,11 @@ func (t *Tracer) Start(ctx context.Context, name string) (context.Context, func(
 	start := t.now()
 	sc, ok := fromContext(ctx)
 	if !ok {
-		// 新链路：一次性决策，贯穿整条链路。
-		sc = spanContext{traceID: newID(), decision: t.sampler.Decide(sc.traceID)}
+		// 新链路：先生成 ID 再基于该 ID 一次性决策，贯穿整条链路。
+		// 注意不能写进同一个复合字面量——右值先于赋值求值，
+		// 否则 Decide 拿到的会是赋值前的零值 ID，导致所有链路决策相同。
+		id := newID()
+		sc = spanContext{traceID: id, decision: t.sampler.Decide(id)}
 	}
 	child := spanContext{
 		traceID:  sc.traceID,
