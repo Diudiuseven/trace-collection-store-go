@@ -148,3 +148,45 @@ func TestConcurrentTracesNoCrossTalk(t *testing.T) {
 		}
 	}
 }
+
+// TestKeepErrorsOnErrorTracePreserved KeepErrors 打开时，即使采样率为 0，
+// 出现异常的链路其全部环节（含正常环节）都要上报，供存储层整链保留。
+func TestKeepErrorsOnErrorTracePreserved(t *testing.T) {
+	sink := &memSink{}
+	tr := NewTracer(sink, RatioSampler{Rate: 0, KeepErrors: true})
+
+	ctx, endRoot := tr.Start(context.Background(), "root")
+	_, endA := tr.Start(ctx, "a") // 正常子环节，先结束
+	aErr := false
+	endA(aErr)
+	_, endB := tr.Start(ctx, "b") // 异常子环节
+	endB(true)
+	endRoot(false)
+
+	if len(sink.spans) != 3 {
+		t.Fatalf("异常链路的全部环节都应暂存上报，得到 %d/3", len(sink.spans))
+	}
+	for _, sp := range sink.spans {
+		if sp.Sampled {
+			t.Fatal("采样率为 0 时不应有环节标记为采样命中")
+		}
+		if sp.TraceID != TraceID(ctx) {
+			t.Fatal("异常链路环节串扰")
+		}
+	}
+}
+
+// TestKeepErrorsOffNoBypass KeepErrors 关闭时，异常链路不得绕过采样率：
+// 采样率 0 下即使环节报错也一条不上报。
+func TestKeepErrorsOffNoBypass(t *testing.T) {
+	sink := &memSink{}
+	tr := NewTracer(sink, RatioSampler{Rate: 0, KeepErrors: false})
+
+	ctx, endRoot := tr.Start(context.Background(), "root")
+	_, endChild := tr.Start(ctx, "child")
+	endChild(true) // 子环节异常
+	endRoot(true)
+	if len(sink.spans) != 0 {
+		t.Fatalf("KeepErrors=false 时异常链路不得额外保留，上报了 %d 个环节", len(sink.spans))
+	}
+}

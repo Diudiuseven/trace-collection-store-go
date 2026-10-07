@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -122,5 +123,58 @@ func TestEndToEndSampling(t *testing.T) {
 	v := res.Traces[0]
 	if !v.HasError || !v.Complete || len(v.Spans) != 5 {
 		t.Fatalf("异常链路不完整: %+v", v)
+	}
+}
+
+// TestEndToEndFractionalRate 端到端：小数采样率下，存储实际保留的链路
+// 比例长期贴近配置值，且每条被保留链路结构完整；不同链路决策相互独立。
+func TestEndToEndFractionalRate(t *testing.T) {
+	for _, rate := range []float64{0.1, 0.5, 0.9} {
+		st, err := store.Open(store.Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tr := trace.NewTracer(st, trace.RatioSampler{Rate: rate})
+
+		const n = 2000
+		var wg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _ = workload(context.Background(), tr, false)
+			}()
+		}
+		wg.Wait()
+
+		res, err := st.Query(context.Background(), store.Query{Limit: 1024})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 分页拉全
+		kept := len(res.Traces)
+		for res.NextCursor != "" {
+			cursor := res.NextCursor
+			res, err = st.Query(context.Background(), store.Query{Limit: 1024, Cursor: cursor})
+			if err != nil {
+				t.Fatal(err)
+			}
+			kept += len(res.Traces)
+		}
+		got := float64(kept) / n
+		const tol = 0.05
+		if math.Abs(got-rate) > tol {
+			t.Fatalf("Rate=%v 端到端实际保留比例 %.3f 超出容差 ±%.2f（保留 %d/%d）",
+				rate, got, tol, kept, n)
+		}
+		// 抽检结构完整
+		res, _ = st.Query(context.Background(), store.Query{Limit: 64})
+		for _, v := range res.Traces {
+			if !v.Complete || len(v.Spans) != 5 {
+				t.Fatalf("保留链路不完整: %+v", v)
+			}
+		}
+		st.Close()
+		t.Logf("Rate=%v 保留 %d/%d (%.3f)", rate, kept, n, got)
 	}
 }
